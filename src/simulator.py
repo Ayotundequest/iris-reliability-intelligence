@@ -5,19 +5,12 @@ from datetime import datetime
 from statistics import mean, stdev
 
 # -----------------------------
-# IRIS Day 4: Deviation Checker
+# IRIS Day 5: Persistence Logic
 # -----------------------------
-# Load baseline ("normal"), generate current behaviour, compute stats,
-# and report deviations vs baseline. No alerts, no risk scoring.
 
 def percentile(sorted_values, p: float) -> float:
     if not sorted_values:
-        raise ValueError("Cannot compute percentile of empty list.")
-    if p <= 0:
-        return sorted_values[0]
-    if p >= 100:
-        return sorted_values[-1]
-
+        raise ValueError("Empty list")
     k = (len(sorted_values) - 1) * (p / 100.0)
     f = int(k)
     c = min(f + 1, len(sorted_values) - 1)
@@ -25,33 +18,21 @@ def percentile(sorted_values, p: float) -> float:
         return sorted_values[f]
     return sorted_values[f] + (sorted_values[c] - sorted_values[f]) * (k - f)
 
-def compute_stats(latencies: list[float]) -> dict:
+def compute_stats(latencies):
     lat_sorted = sorted(latencies)
     return {
         "mean_ms": mean(latencies),
         "std_ms": stdev(latencies) if len(latencies) >= 2 else 0.0,
-        "min_ms": min(latencies),
-        "max_ms": max(latencies),
         "p95_ms": percentile(lat_sorted, 95),
     }
 
-def generate_latency_current(step: int, drift_total_ms: float, samples: int) -> float:
-    """
-    Current behaviour generator with subtle drift.
-    - drift_total_ms: total drift added by the end of the run
-    - step: current index
-    """
+def generate_latency(step, drift_total, samples):
     base = random.uniform(20, 50)
-
-    # Linear drift from 0 -> drift_total_ms across the run
-    drift = (step / max(samples - 1, 1)) * drift_total_ms
-
-    # Slight extra jitter 
+    drift = (step / max(samples - 1, 1)) * drift_total
     jitter = random.uniform(-2, 2)
-
     return base + drift + jitter
 
-def load_baseline(path: str) -> dict | None:
+def load_baseline(path):
     try:
         with open(path, "r") as f:
             return json.load(f)
@@ -60,73 +41,63 @@ def load_baseline(path: str) -> dict | None:
 
 if __name__ == "__main__":
     region = "Region_A"
+    baseline = load_baseline("data/baseline_region_a.json")
 
-    baseline_path = "data/baseline_region_a.json"
-    baseline = load_baseline(baseline_path)
-
-    # ---- If baseline isn't available (because data/ is ignored), fallback safely ----
     if baseline is None:
-        print("Baseline file not found. Creating a temporary baseline (fallback) from a healthy run...")
-        baseline_samples = 120
-        baseline_latencies = [random.uniform(20, 50) for _ in range(baseline_samples)]
-        baseline_stats = compute_stats(baseline_latencies)
+        baseline_lat = [random.uniform(20, 50) for _ in range(120)]
+        baseline_stats = compute_stats(baseline_lat)
         baseline = {
-            "region": region,
-            "samples": baseline_samples,
-            "interval_sec": 1,
-            "created_at": datetime.now().isoformat(),
-            **{k: round(v, 3) for k, v in baseline_stats.items()},
+            "mean_ms": baseline_stats["mean_ms"],
+            "std_ms": baseline_stats["std_ms"],
+            "p95_ms": baseline_stats["p95_ms"],
         }
-        print("Temporary baseline created.\n")
 
-    # ---- Current run config ----
-    current_samples = 120
-    interval_sec = 1
+    windows = 3
+    samples_per_window = 120
+    drift_total_ms = 8.0
 
-    # Subtle drift to simulate early degradation (tunable)
-    drift_total_ms = 8.0  # total increase by end of run (subtle)
+    persistence_count = 0
 
-    # ---- Collect current data ----
-    current_latencies = []
-    log_path = "data/current_latency.log"
-    with open(log_path, "w") as log_file:
-        for i in range(current_samples):
-            latency = generate_latency_current(i, drift_total_ms, current_samples)
-            ts = datetime.now().isoformat()
-            current_latencies.append(latency)
+    print("\n=== IRIS PERSISTENCE CHECK ===")
 
-            line = f"{ts}, latency={latency:.2f}ms\n"
-            print(line.strip())
-            log_file.write(line)
+    for w in range(1, windows + 1):
+        latencies = [
+            generate_latency(i, drift_total_ms, samples_per_window)
+            for i in range(samples_per_window)
+        ]
 
-            time.sleep(interval_sec)
+        stats = compute_stats(latencies)
 
-    # ---- Compute current stats ----
-    current_stats = compute_stats(current_latencies)
+        d_mean = stats["mean_ms"] - baseline["mean_ms"]
+        d_p95 = stats["p95_ms"] - baseline["p95_ms"]
+        std_ratio = stats["std_ms"] / (baseline["std_ms"] or 1e-9)
 
-    # ---- Compute deviations vs baseline ----
-    d_mean = current_stats["mean_ms"] - float(baseline["mean_ms"])
-    d_std = current_stats["std_ms"] - float(baseline["std_ms"])
-    d_p95 = current_stats["p95_ms"] - float(baseline["p95_ms"])
+        deviation = (
+            d_mean > 3 or
+            d_p95 > 3 or
+            std_ratio > 1.3
+        )
 
-    # Percent change in std (variability) is often more meaningful
-    baseline_std = float(baseline["std_ms"]) if float(baseline["std_ms"]) != 0 else 1e-9
-    std_ratio = current_stats["std_ms"] / baseline_std
+        if deviation:
+            persistence_count += 1
+            status = "DEVIATION"
+        else:
+            persistence_count = 0
+            status = "NORMAL"
 
-    # ---- Human-readable deviation summary ----
-    print("\n=== IRIS DEVIATION SUMMARY (NO ALERTS) ===")
-    print(f"Region: {region}")
-    print(f"Baseline mean/std/p95: {baseline['mean_ms']} / {baseline['std_ms']} / {baseline['p95_ms']} ms")
-    print(f"Current   mean/std/p95: {current_stats['mean_ms']:.3f} / {current_stats['std_ms']:.3f} / {current_stats['p95_ms']:.3f} ms")
-    print(f"ΔMean: {d_mean:+.3f} ms")
-    print(f"ΔStd : {d_std:+.3f} ms (std ratio: {std_ratio:.2f}x)")
-    print(f"ΔP95 : {d_p95:+.3f} ms")
-    print(f"Raw current log saved to: {log_path}")
+        print(
+            f"Window {w}: {status} | "
+            f"ΔMean={d_mean:+.2f}ms "
+            f"ΔP95={d_p95:+.2f}ms "
+            f"StdRatio={std_ratio:.2f}x"
+        )
 
-    # ---- Gentle interpretation (still not an alert) ----
-    if d_mean > 3 or std_ratio > 1.3 or d_p95 > 3:
-        print("\nInterpretation: Current behaviour is drifting away from baseline.")
-        print("Next (Day 5): add persistence checks to reduce false positives.")
+    print("\n=== IRIS INTERPRETATION ===")
+    if persistence_count >= 3:
+        print("Persistent deviation detected across multiple windows.")
+        print("This is likely a real reliability issue (not noise).")
+    elif persistence_count >= 1:
+        print("Intermittent deviation observed.")
+        print("Continue monitoring; no action yet.")
     else:
-        print("\nInterpretation: Current behaviour is consistent with baseline.")
-        print("Next (Day 5): introduce controlled stress/degradation and persistence logic.")
+        print("Behaviour consistent with baseline.")
