@@ -1,17 +1,12 @@
 import random
-import time
-import json
-from datetime import datetime
 from statistics import mean, stdev
 
 # -----------------------------
-# IRIS Day 5: Persistence Logic
+# IRIS Day 6: Pattern 1 - Slow Drift
 # -----------------------------
 
-def percentile(sorted_values, p: float) -> float:
-    if not sorted_values:
-        raise ValueError("Empty list")
-    k = (len(sorted_values) - 1) * (p / 100.0)
+def percentile(sorted_values, p):
+    k = (len(sorted_values) - 1) * (p / 100)
     f = int(k)
     c = min(f + 1, len(sorted_values) - 1)
     if f == c:
@@ -19,85 +14,60 @@ def percentile(sorted_values, p: float) -> float:
     return sorted_values[f] + (sorted_values[c] - sorted_values[f]) * (k - f)
 
 def compute_stats(latencies):
-    lat_sorted = sorted(latencies)
+    s = sorted(latencies)
     return {
-        "mean_ms": mean(latencies),
-        "std_ms": stdev(latencies) if len(latencies) >= 2 else 0.0,
-        "p95_ms": percentile(lat_sorted, 95),
+        "mean": mean(latencies),
+        "std": stdev(latencies) if len(latencies) >= 2 else 0.0,
+        "p95": percentile(s, 95)
     }
 
-def generate_latency(step, drift_total, samples):
-    base = random.uniform(20, 50)
-    drift = (step / max(samples - 1, 1)) * drift_total
-    jitter = random.uniform(-2, 2)
-    return base + drift + jitter
+def generate_window(samples, drift):
+    latencies = []
+    for i in range(samples):
+        base = random.uniform(20, 50)
+        jitter = random.uniform(-2, 2)
+        latencies.append(base + drift + jitter)
+    return latencies
 
-def load_baseline(path):
-    try:
-        with open(path, "r") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return None
+# ---- Simulation config ----
+windows = 4
+samples_per_window = 120
+drift_step = 3.0  # ms added per window
 
-if __name__ == "__main__":
-    region = "Region_A"
-    baseline = load_baseline("data/baseline_region_a.json")
+window_stats = []
 
-    if baseline is None:
-        baseline_lat = [random.uniform(20, 50) for _ in range(120)]
-        baseline_stats = compute_stats(baseline_lat)
-        baseline = {
-            "mean_ms": baseline_stats["mean_ms"],
-            "std_ms": baseline_stats["std_ms"],
-            "p95_ms": baseline_stats["p95_ms"],
-        }
+print("\n=== IRIS PATTERN ANALYSIS: SLOW DRIFT ===")
 
-    windows = 3
-    samples_per_window = 120
-    drift_total_ms = 8.0
+for w in range(windows):
+    drift = w * drift_step
+    lat = generate_window(samples_per_window, drift)
+    stats = compute_stats(lat)
+    window_stats.append(stats)
 
-    persistence_count = 0
+    print(
+        f"Window {w+1}: "
+        f"Mean={stats['mean']:.2f}ms "
+        f"P95={stats['p95']:.2f}ms "
+        f"Std={stats['std']:.2f}ms"
+    )
 
-    print("\n=== IRIS PERSISTENCE CHECK ===")
+# ---- Detect slow drift pattern ----
+mean_trend = all(
+    window_stats[i]["mean"] < window_stats[i+1]["mean"]
+    for i in range(len(window_stats)-1)
+)
 
-    for w in range(1, windows + 1):
-        latencies = [
-            generate_latency(i, drift_total_ms, samples_per_window)
-            for i in range(samples_per_window)
-        ]
+p95_trend = all(
+    window_stats[i]["p95"] < window_stats[i+1]["p95"]
+    for i in range(len(window_stats)-1)
+)
 
-        stats = compute_stats(latencies)
+std_stable = max(ws["std"] for ws in window_stats) < 1.5 * min(ws["std"] for ws in window_stats)
 
-        d_mean = stats["mean_ms"] - baseline["mean_ms"]
-        d_p95 = stats["p95_ms"] - baseline["p95_ms"]
-        std_ratio = stats["std_ms"] / (baseline["std_ms"] or 1e-9)
+print("\n=== IRIS PATTERN CLASSIFICATION ===")
 
-        deviation = (
-            d_mean > 3 or
-            d_p95 > 3 or
-            std_ratio > 1.3
-        )
-
-        if deviation:
-            persistence_count += 1
-            status = "DEVIATION"
-        else:
-            persistence_count = 0
-            status = "NORMAL"
-
-        print(
-            f"Window {w}: {status} | "
-            f"ΔMean={d_mean:+.2f}ms "
-            f"ΔP95={d_p95:+.2f}ms "
-            f"StdRatio={std_ratio:.2f}x"
-        )
-
-    print("\n=== IRIS INTERPRETATION ===")
-    if persistence_count >= 3:
-        print("Persistent deviation detected across multiple windows.")
-        print("This is likely a real reliability issue (not noise).")
-    elif persistence_count >= 1:
-        print("Intermittent deviation observed.")
-        print("Continue monitoring; no action yet.")
-    else:
-        print("Behaviour consistent with baseline.")
+if mean_trend and p95_trend and std_stable:
+    print("Pattern detected: SLOW DRIFT")
+    print("Interpretation: Gradual, persistent performance degradation.")
+else:
+    print("No clear slow-drift pattern detected.")
